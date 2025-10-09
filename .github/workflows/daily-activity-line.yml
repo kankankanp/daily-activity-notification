@@ -1,0 +1,112 @@
+name: Daily Activity Notification
+
+on:
+  schedule:
+    # 毎日 00:10 JST（15:10 UTC）に通知
+    - cron: '10 15 * * *'
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Collect daily activity
+        id: stats
+        shell: bash
+        env:
+          TARGET_TZ: Asia/Tokyo
+        run: |
+          target_date=$(TZ="${TARGET_TZ}" date -d 'yesterday' +%Y-%m-%d)
+          since="${target_date}T00:00:00+09:00"
+          until="${target_date}T23:59:59+09:00"
+
+          commit_count=$(git rev-list --count --no-merges --since="$since" --until="$until" HEAD || echo 0)
+
+          declare -A seen_files
+          lines_added=0
+          lines_deleted=0
+
+          while IFS=$'\t' read -r added deleted file; do
+            if [[ -z "$file" || "$file" == "-" ]]; then
+              continue
+            fi
+            # 追加・削除行数が "-" のケースは巨大ファイルなので集計対象外
+            if [[ "$added" != "-" ]]; then
+              lines_added=$((lines_added + added))
+            fi
+            if [[ "$deleted" != "-" ]]; then
+              lines_deleted=$((lines_deleted + deleted))
+            fi
+            seen_files["$file"]=1
+          done < <(git log --no-merges --since="$since" --until="$until" --numstat --pretty=tformat:)
+
+          files_changed=${#seen_files[@]}
+          lines_changed=$((lines_added + lines_deleted))
+
+          if [[ "$commit_count" -eq 0 ]]; then
+            color_hex="#ebedf0"
+            color_level="レベル0（貢献なし）"
+          elif [[ "$commit_count" -le 2 ]]; then
+            color_hex="#9be9a8"
+            color_level="レベル1（少し貢献）"
+          elif [[ "$commit_count" -le 4 ]]; then
+            color_hex="#40c463"
+            color_level="レベル2（適度に貢献）"
+          elif [[ "$commit_count" -le 6 ]]; then
+            color_hex="#30a14e"
+            color_level="レベル3（かなり貢献）"
+          else
+            color_hex="#216e39"
+            color_level="レベル4（とても活発）"
+          fi
+
+          {
+            echo "target_date=$target_date"
+            echo "commit_count=$commit_count"
+            echo "files_changed=$files_changed"
+            echo "lines_added=$lines_added"
+            echo "lines_deleted=$lines_deleted"
+            echo "lines_changed=$lines_changed"
+            echo "color_hex=$color_hex"
+            echo "color_level=$color_level"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send LINE message via Messaging API
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TARGET_ID: ${{ secrets.LINE_TARGET_ID }}
+          TARGET_DATE: ${{ steps.stats.outputs.target_date }}
+          COMMIT_COUNT: ${{ steps.stats.outputs.commit_count }}
+          FILES_CHANGED: ${{ steps.stats.outputs.files_changed }}
+          LINES_CHANGED: ${{ steps.stats.outputs.lines_changed }}
+          LINES_ADDED: ${{ steps.stats.outputs.lines_added }}
+          LINES_DELETED: ${{ steps.stats.outputs.lines_deleted }}
+          COLOR_LEVEL: ${{ steps.stats.outputs.color_level }}
+        run: |
+          if [[ -z "${LINE_CHANNEL_ACCESS_TOKEN}" ]]; then
+            echo "LINE Messaging API のチャネルアクセストークンが設定されていません (LINE_CHANNEL_ACCESS_TOKEN)。" >&2
+            exit 1
+          fi
+
+          if [[ -z "${LINE_TARGET_ID}" ]]; then
+            echo "送信先ユーザー／ルーム ID が設定されていません (LINE_TARGET_ID)。" >&2
+            exit 1
+          fi
+
+          printf -v message '📊 %s の活動サマリー\n- コミット数: %s\n- 変更ファイル数: %s\n- 変更行数 (±): %s\n- 内訳: 追加 %s 行 / 削除 %s 行\n- 貢献レベル: %s' \
+            "${TARGET_DATE}" "${COMMIT_COUNT}" "${FILES_CHANGED}" "${LINES_CHANGED}" "${LINES_ADDED}" "${LINES_DELETED}" "${COLOR_LEVEL}"
+
+          payload=$(jq -n \
+            --arg to "${LINE_TARGET_ID}" \
+            --arg text "${message}" \
+            '{to: $to, messages: [{type: "text", text: $text}]}'
+          )
+
+          curl -sS -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${LINE_CHANNEL_ACCESS_TOKEN}" \
+            -d "${payload}" \
+            https://api.line.me/v2/bot/message/push

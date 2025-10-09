@@ -1,0 +1,42 @@
+name: Daily Green Commit
+
+on:
+  schedule:
+    # 毎日 00:05 JST（15:05 UTC）に実行
+    - cron: '5 15 * * *'
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Git user
+        run: |
+          git config user.name "${GIT_COMMIT_USER_NAME}"
+          git config user.email "${GIT_COMMIT_USER_EMAIL}"
+        env:
+          GIT_COMMIT_USER_NAME: ${{ secrets.COMMIT_BOT_NAME || 'github-actions[bot]' }}
+          GIT_COMMIT_USER_EMAIL: ${{ secrets.COMMIT_BOT_EMAIL || 'github-actions[bot]@users.noreply.github.com' }}
+
+      - name: Update daily log
+        run: |
+          mkdir -p logs
+          timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "${timestamp} daily heartbeat" >> logs/daily-commit.log
+
+      - name: Commit changes
+        run: |
+          if git diff --quiet; then
+            echo "変更はありません。"
+            exit 0
+          fi
+          git add logs/daily-commit.log
+          git commit -m "chore: daily contribution $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Push changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git push
