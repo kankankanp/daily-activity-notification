@@ -3,7 +3,7 @@ name: Daily Activity Notification
 on:
   schedule:
     # 毎日 00:10 JST（15:10 UTC）に通知
-    - cron: '10 15 * * *'
+    - cron: "10 15 * * *"
   workflow_dispatch:
 
 jobs:
@@ -99,14 +99,30 @@ jobs:
           printf -v message '📊 %s の活動サマリー\n- コミット数: %s\n- 変更ファイル数: %s\n- 変更行数 (±): %s\n- 内訳: 追加 %s 行 / 削除 %s 行\n- 貢献レベル: %s' \
             "${TARGET_DATE}" "${COMMIT_COUNT}" "${FILES_CHANGED}" "${LINES_CHANGED}" "${LINES_ADDED}" "${LINES_DELETED}" "${COLOR_LEVEL}"
 
-          payload=$(jq -n \
-            --arg to "${LINE_TARGET_ID}" \
-            --arg text "${message}" \
-            '{to: $to, messages: [{type: "text", text: $text}]}'
-          )
+          # Support single ID or multiple IDs (comma/newline/space separated)
+          # Normalize separators to newlines, drop empty lines
+          ids_clean=$(printf '%s' "${LINE_TARGET_ID}" | tr ',' '\n' | tr -s ' ' '\n' | tr '\r' '\n' | sed '/^\s*$/d')
+
+          # Build JSON array of recipients using jq. This produces compact JSON like ["Uxxxx","Uyyyy"]
+          to_json=$(printf '%s\n' "${ids_clean}" | jq -R . | jq -s -c .)
+
+          # Build payload: use the same shape for push (single) and multicast (multiple)
+          payload=$(jq -n --argjson to "${to_json}" --arg text "${message}" '{to: $to, messages: [{type: "text", text: $text}]}')
+
+          # Choose endpoint: push supports a single recipient string, multicast supports arrays of recipients
+          recipient_count=$(printf '%s\n' "${ids_clean}" | wc -l | tr -d ' ')
+
+          if [[ "${recipient_count}" -gt 1 ]]; then
+            endpoint="https://api.line.me/v2/bot/message/multicast"
+          else
+            # For push the API expects 'to' to be a string, not an array. Extract single id value.
+            single_to=$(printf '%s\n' "${ids_clean}" | head -n1)
+            payload=$(jq -n --arg to "${single_to}" --arg text "${message}" '{to: $to, messages: [{type: "text", text: $text}]}')
+            endpoint="https://api.line.me/v2/bot/message/push"
+          fi
 
           curl -sS -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${LINE_CHANNEL_ACCESS_TOKEN}" \
             -d "${payload}" \
-            https://api.line.me/v2/bot/message/push
+            "${endpoint}"
