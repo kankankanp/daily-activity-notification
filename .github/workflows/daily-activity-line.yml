@@ -92,7 +92,7 @@ jobs:
           fi
 
           if [[ -z "${LINE_TARGET_ID}" ]]; then
-            echo "送信先ユーザー／ルーム ID が設定されていません (LINE_TARGET_ID)。" >&2
+            echo "送信先ユーザー / ルーム ID が設定されていません (LINE_TARGET_ID)。" >&2
             exit 1
           fi
 
